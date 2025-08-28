@@ -3,7 +3,7 @@ import { Button, Tooltip } from 'UI';
 import { connect } from 'react-redux';
 import cn from 'classnames';
 import ChatWindow from '../../ChatWindow';
-import { CallingState, ConnectionStatus, RemoteControlStatus, RequestLocalStream } from 'Player';
+import { CallingState, ConnectionStatus, RequestLocalStream } from 'Player';
 import type { LocalStream } from 'Player';
 import { PlayerContext, ILivePlayerContext } from 'App/components/Session/playerContext';
 import { observer } from 'mobx-react-lite';
@@ -15,10 +15,6 @@ import { audioContextManager } from 'App/utils/screenRecorder';
 
 function onReject() {
   toast.info(`Call was rejected.`);
-}
-
-function onControlReject() {
-  toast.info('Remote control request was rejected by user');
 }
 
 function onError(e: any) {
@@ -50,17 +46,13 @@ function AssistActions({
     assistManager: {
       call: callPeer,
       setCallArgs,
-      requestReleaseRemoteControl,
       toggleAnnotation,
-      setRemoteControlCallbacks,
     },
-    toggleUserName,
   } = player;
   const {
     calling,
     annotating,
     peerConnectionStatus,
-    remoteControl: remoteControlStatus,
     livePlay,
   } = store.get();
 
@@ -74,9 +66,6 @@ function AssistActions({
   const cannotCall =
     peerConnectionStatus !== ConnectionStatus.Connected || (isEnterprise && !hasPermission);
 
-  const remoteRequesting = remoteControlStatus === RemoteControlStatus.Requesting;
-  const remoteActive = remoteControlStatus === RemoteControlStatus.Enabled;
-
   useEffect(() => {
     if (!onCall && isCallActive && agentIds) {
       setPrestart(true);
@@ -89,22 +78,8 @@ function AssistActions({
       if (annotating) {
         toggleAnnotation(false);
       }
-      if (remoteActive) {
-        requestReleaseRemoteControl();
-      }
     }
   }, [livePlay]);
-
-  useEffect(() => {
-    if (remoteActive) {
-      toggleUserName(userDisplayName);
-    } else {
-      // higher than waiting for messages
-      if (peerConnectionStatus > 1) {
-        toggleUserName();
-      }
-    }
-  }, [remoteActive]);
 
   useEffect(() => {
     return callObject?.end();
@@ -150,7 +125,7 @@ function AssistActions({
   }
 
   const confirmCall = async () => {
-    if (callRequesting || remoteRequesting) return;
+    if (callRequesting) return;
 
     if (
       await confirm({
@@ -163,15 +138,9 @@ function AssistActions({
     }
   };
 
-  const requestControl = () => {
-    setRemoteControlCallbacks({ onReject: onControlReject });
-    if (callRequesting || remoteRequesting) return;
-    requestReleaseRemoteControl();
-  };
-
   return (
     <div className="flex items-center">
-      {(onCall || remoteActive) && (
+      {(onCall) && (
         <>
           <div
             className={cn('cursor-pointer p-2 flex items-center', {
@@ -194,27 +163,6 @@ function AssistActions({
 
       {/* @ts-ignore wtf? */}
       <ScreenRecorder />
-      <div className={stl.divider} />
-
-      {/* @ts-ignore */}
-      <Tooltip title="Go live to initiate remote control" disabled={livePlay}>
-        <div
-          className={cn('cursor-pointer p-2 flex items-center', {
-            [stl.disabled]: cannotCall || !livePlay || callRequesting || remoteRequesting,
-          })}
-          onClick={requestControl}
-          role="button"
-        >
-          <Button
-            icon={remoteActive ? 'window-x' : 'remote-control'}
-            variant={remoteActive ? 'text-red' : 'text-primary'}
-            style={{ height: '28px' }}
-          >
-            Remote Control
-          </Button>
-        </div>
-      </Tooltip>
-      <div className={stl.divider} />
 
       <Tooltip
         title={
@@ -226,7 +174,7 @@ function AssistActions({
       >
         <div
           className={cn('cursor-pointer p-2 flex items-center', {
-            [stl.disabled]: cannotCall || callRequesting || remoteRequesting,
+            [stl.disabled]: cannotCall || callRequesting,
           })}
           onClick={onCall ? callObject?.end : confirmCall}
           role="button"

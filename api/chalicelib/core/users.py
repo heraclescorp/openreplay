@@ -1,7 +1,9 @@
 import json
+import logging
 import secrets
 
 from decouple import config
+from psycopg2 import errors as pg_errors
 from fastapi import BackgroundTasks
 
 import schemas
@@ -13,8 +15,91 @@ from chalicelib.utils import pg_client
 from chalicelib.utils.TimeUTC import TimeUTC
 
 
+logger = logging.getLogger(__name__)
+
+
+class SsoProvisionError(Exception):
+    """SSO just-in-time user creation failed."""
+
+
 def __generate_invitation_token():
     return secrets.token_urlsafe(64)
+
+
+def __name_from_email(normalized_email: str) -> str:
+    local = normalized_email.split("@", 1)[0]
+    return local if local else normalized_email
+
+
+def provision_sso_member(email: str, role: str = "member") -> dict:
+    """Create a joined member for SSO (no invite email, no pending invitation). Idempotent."""
+    from chalicelib.core import sso_config
+
+    normalized = sso_config.normalize_email(email)
+    existing = get_by_email_normalized(normalized)
+    if existing is not None:
+        return existing
+
+    if role != "member":
+        role = "member"
+    name = __name_from_email(normalized)
+    random_password = secrets.token_urlsafe(48)
+
+    try:
+        with pg_client.PostgresClient() as cur:
+            query = cur.mogrify(
+                """\
+                WITH ins AS (
+                    INSERT INTO public.users (email, role, name, data)
+                    VALUES (%(email)s, %(role)s, %(name)s, %(data)s)
+                    ON CONFLICT (email) DO NOTHING
+                    RETURNING user_id, email, role, name
+                ),
+                auth AS (
+                    INSERT INTO public.basic_authentication (user_id, password, invitation_token, invited_at)
+                    SELECT ins.user_id,
+                           crypt(%(password)s, gen_salt('bf', 12)),
+                           NULL,
+                           NULL
+                    FROM ins
+                    RETURNING user_id
+                )
+                SELECT users.user_id,
+                       1 AS tenant_id,
+                       users.email,
+                       users.role,
+                       users.name,
+                       (CASE WHEN users.role = 'owner' THEN TRUE ELSE FALSE END)  AS super_admin,
+                       (CASE WHEN users.role = 'admin' THEN TRUE ELSE FALSE END)  AS admin,
+                       (CASE WHEN users.role = 'member' THEN TRUE ELSE FALSE END) AS member
+                FROM public.users
+                INNER JOIN auth ON auth.user_id = users.user_id;""",
+                {
+                    "email": normalized,
+                    "role": role,
+                    "name": name,
+                    "data": json.dumps({"lastAnnouncementView": TimeUTC.now()}),
+                    "password": random_password,
+                },
+            )
+            cur.execute(query)
+            row = cur.fetchone()
+            if row is not None:
+                return helper.dict_to_camel_case(row)
+    except pg_errors.UniqueViolation:
+        logger.info("SSO provision race resolved for email=%s", normalized)
+    except pg_errors.Error as error:
+        logger.error("SSO provision database error for email=%s: %s", normalized, error)
+        raise SsoProvisionError("database error during SSO provisioning") from error
+    except Exception as error:
+        logger.error("SSO provision failed for email=%s: %s", normalized, error)
+        raise SsoProvisionError("unexpected error during SSO provisioning") from error
+
+    resolved = get_by_email_normalized(normalized)
+    if resolved is None:
+        logger.error("SSO provision left no user for email=%s", normalized)
+        raise SsoProvisionError("user missing after SSO provisioning")
+    return resolved
 
 
 def create_new_member(email, invitation_token, admin, name, owner=False):
@@ -343,6 +428,77 @@ def get_by_email_only(email):
         )
         r = cur.fetchone()
     return helper.dict_to_camel_case(r)
+
+
+def get_by_email_normalized(email: str):
+    from chalicelib.core import sso_config
+
+    normalized = sso_config.normalize_email(email)
+    with pg_client.PostgresClient() as cur:
+        cur.execute(
+            cur.mogrify(
+                """SELECT 
+                        users.user_id,
+                        1 AS tenant_id,
+                        users.email,
+                        users.role,
+                        users.name,
+                        (CASE WHEN users.role = 'owner' THEN TRUE ELSE FALSE END)  AS super_admin,
+                        (CASE WHEN users.role = 'admin' THEN TRUE ELSE FALSE END)  AS admin,
+                        (CASE WHEN users.role = 'member' THEN TRUE ELSE FALSE END) AS member
+                    FROM public.users
+                    WHERE lower(trim(users.email)) = %(email)s
+                      AND users.deleted_at IS NULL
+                    LIMIT 1;""",
+                {"email": normalized},
+            )
+        )
+        r = cur.fetchone()
+    if r is None:
+        return None
+    return helper.dict_to_camel_case(r)
+
+
+def issue_session_for_sso_email(email: str, expiration_seconds: int | None = None) -> dict | None:
+    """Resolve session for SSO, optionally JIT-provisioning allowed domains."""
+    from chalicelib.core import sso_config
+
+    session = issue_session_for_email(email, expiration_seconds=expiration_seconds)
+    if session is not None:
+        return session
+    if not sso_config.sso_auto_provision_enabled():
+        return None
+    domain = sso_config.email_domain(email)
+    if domain not in sso_config.sso_auto_provision_domains():
+        return None
+    provision_sso_member(email, role=sso_config.sso_auto_provision_role())
+    return issue_session_for_email(email, expiration_seconds=expiration_seconds)
+
+
+def issue_session_for_email(email: str, expiration_seconds: int | None = None) -> dict | None:
+    """Same JWT/session shape as users.authenticate after password verification."""
+    from chalicelib.core import sso_config
+
+    r = get_by_email_normalized(email)
+    if r is None:
+        return None
+    jwt_iat = change_jwt_iat(r["userId"])
+    iat = TimeUTC.datetime_to_timestamp(jwt_iat)
+    if expiration_seconds is None:
+        minutes = sso_config.sso_session_minutes()
+        if minutes is not None and minutes > 0:
+            expiration_seconds = minutes * 60
+    return {
+        "jwt": authorizers.generate_jwt(
+            r["userId"],
+            r["tenantId"],
+            iat=iat,
+            aud=f"front:{helper.get_stage_name()}",
+            expiration_seconds=expiration_seconds,
+        ),
+        "email": r["email"],
+        **r,
+    }
 
 
 def get_member(tenant_id, user_id):

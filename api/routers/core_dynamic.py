@@ -1,15 +1,18 @@
+import json
+import logging
 from typing import Optional, Union
 
 from decouple import config
-from fastapi import Body, Depends, BackgroundTasks
+from fastapi import Body, Depends, BackgroundTasks, Request
 from fastapi import HTTPException, status
-from starlette.responses import RedirectResponse, FileResponse
+from starlette.responses import RedirectResponse, FileResponse, PlainTextResponse, HTMLResponse
 
 import schemas
 from chalicelib.core import sessions, errors, errors_viewed, errors_favorite, sessions_assignments, heatmaps, \
     sessions_favorite, assist, sessions_notes, click_maps, sessions_replay, signup, feature_flags
 from chalicelib.core import sessions_viewed
-from chalicelib.core import tenants, users, projects, license
+from chalicelib.core import tenants, users, projects, license, sso_config
+from chalicelib.core.users import SsoProvisionError
 from chalicelib.core import webhook
 from chalicelib.core.collaboration_slack import Slack
 from chalicelib.utils import captcha, smtp
@@ -19,15 +22,100 @@ from or_dependencies import OR_context
 from routers.base import get_routers
 
 public_app, app, app_apikey = get_routers()
+logger = logging.getLogger(__name__)
 
 
 @public_app.get('/signup', tags=['signup'])
 def get_all_signup():
-    return {"data": {"tenants": tenants.tenants_exists(),
-                     "sso": None,
-                     "ssoProvider": None,
-                     "enforceSSO": None,
-                     "edition": license.EDITION}}
+    sso_on = sso_config.sso_oidc_enabled()
+    return {
+        "data": {
+            "tenants": tenants.tenants_exists(),
+            "sso": True if sso_on else None,
+            "ssoProvider": None,
+            "enforceSSO": None,
+            "edition": license.EDITION,
+        }
+    }
+
+
+def _proxy_cookie_clear_headers() -> list[str]:
+    """Expire oauth2-proxy session cookies after SSO handoff (single-use proxy session)."""
+    cleared = []
+    for name in ("_oauth2_proxy", "_oauth2_proxy_0", "_oauth2_proxy_1", "_oauth2_proxy_csrf"):
+        cleared.append(f"{name}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+    return cleared
+
+
+def _sso_login_html_response(jwt_token: str) -> HTMLResponse:
+    """Same-origin handoff: persist JWT like frontend LocalStorage (key user) without ?jwt= in URL."""
+    token_js = json.dumps(jwt_token)
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>Signing in</title>
+</head><body>
+<script>
+(function() {{
+  var token = {token_js};
+  try {{
+    var raw = localStorage.getItem("user");
+    var state = raw ? JSON.parse(raw) : {{}};
+    if (typeof state !== "object" || state === null || Array.isArray(state)) state = {{}};
+    state.jwt = token;
+    localStorage.setItem("user", JSON.stringify(state));
+  }} catch (e) {{
+    localStorage.setItem("user", JSON.stringify({{ jwt: token }}));
+  }}
+  location.replace("/");
+}})();
+</script>
+</body></html>"""
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+    }
+    response = HTMLResponse(content=html, status_code=status.HTTP_200_OK, headers=headers)
+    if sso_config.sso_clear_proxy_cookie():
+        for cookie_header in _proxy_cookie_clear_headers():
+            response.headers.append("set-cookie", cookie_header)
+    return response
+
+
+@public_app.get("/sso/saml2", tags=["authentication"])
+def sso_saml2_entry():
+    """Reuse existing Login with SSO href; OIDC uses /sso/login behind gated ingress."""
+    if not sso_config.sso_oidc_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return RedirectResponse(url="/api/sso/login", status_code=status.HTTP_302_FOUND)
+
+
+@public_app.get("/sso/login", tags=["authentication"])
+def sso_oidc_login(request: Request):
+    if not sso_config.sso_oidc_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    expected_secret = config("SSO_INGRESS_SECRET", default="")
+    if not expected_secret or request.headers.get("X-SSO-Secret") != expected_secret:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    email = request.headers.get("X-Auth-Request-Email")
+    if not email or not email.strip():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    try:
+        session = users.issue_session_for_sso_email(email)
+    except SsoProvisionError:
+        return PlainTextResponse(
+            "Unable to complete sign-in. Contact your administrator.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if session is None:
+        return PlainTextResponse(
+            "No OpenReplay account for this email. Ask your admin.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+    jwt = session.pop("jwt")
+    return _sso_login_html_response(jwt)
 
 
 if not tenants.tenants_exists(use_pool=False):

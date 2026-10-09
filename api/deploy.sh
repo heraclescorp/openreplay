@@ -9,13 +9,13 @@ aws ecr get-login-password --region us-east-2 | docker login --username AWS --pa
 
 git_sha=$(git rev-parse --short HEAD)
 envarg="default-foss"
+SSO_TAG="${git_sha}-sso"
 
 cp Dockerfile.dockerignore .dockerignore
 
-# due to the multiple instance types we use, we need to build for multiple platforms
-docker buildx create --use --name=crossplat --node=crossplat
+docker buildx create --use --name=crossplat --node=crossplat 2>/dev/null || docker buildx use crossplat
 docker buildx build \
     --output "type=image,push=true" \
     --platform linux/amd64,linux/arm64 \
     --build-arg envarg=$envarg --build-arg GIT_SHA=$git_sha \
-    --tag "$IMAGE_NAME:latest" .
+    --tag "$IMAGE_NAME:${SSO_TAG}" .

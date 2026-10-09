@@ -19,7 +19,7 @@ def sso_auto_provision_domains() -> set[str]:
 
 
 def sso_auto_provision_role() -> str:
-    role = config("SSO_AUTO_PROVISION_ROLE", default="member").strip().lower()
+    # SSO never grants admin
     return "member"
 
 

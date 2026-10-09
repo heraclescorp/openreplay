@@ -1,5 +1,4 @@
 import json
-import logging
 from typing import Optional, Union
 
 from decouple import config
@@ -22,7 +21,6 @@ from or_dependencies import OR_context
 from routers.base import get_routers
 
 public_app, app, app_apikey = get_routers()
-logger = logging.getLogger(__name__)
 
 
 @public_app.get('/signup', tags=['signup'])

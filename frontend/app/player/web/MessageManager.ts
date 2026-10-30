@@ -106,6 +106,8 @@ export default class MessageManager {
   public readonly tabs: Record<string, TabSessionManager> = {};
   private tabChangeEvents: TabChangeEvent[] = [];
   private activeTab = '';
+  // live: the agent's pick wins over TabChange, which the tracker sends on every window focus
+  private tabPinned = false;
 
   constructor(
     private readonly session: Record<string, any>,
@@ -202,7 +204,7 @@ export default class MessageManager {
       }
 
       if (tabId) {
-        if (this.activeTab !== tabId) {
+        if (this.activeTab !== tabId && !this.tabPinned) {
           this.state.update({ currentTab: tabId });
           this.activeTab = tabId;
           this.tabs[this.activeTab].clean();
@@ -240,7 +242,8 @@ export default class MessageManager {
     }
   }
 
-  public changeTab(tabId: string) {
+  public changeTab(tabId: string, pin = false) {
+    this.tabPinned = pin;
     this.activeTab = tabId;
     this.state.update({ currentTab: tabId });
     this.tabs[tabId].clean();

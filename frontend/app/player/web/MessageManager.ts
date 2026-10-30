@@ -106,7 +106,7 @@ export default class MessageManager {
   public readonly tabs: Record<string, TabSessionManager> = {};
   private tabChangeEvents: TabChangeEvent[] = [];
   private activeTab = '';
-  // live: the agent's pick wins over TabChange, which the tracker sends on every window focus
+  // live: the agent's pick wins over TabChange, which the tracker sends on every start/reload and window focus
   private tabPinned = false;
 
   constructor(

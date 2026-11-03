@@ -340,5 +340,7 @@ export default class TabSessionManager {
 
   clean() {
     this.pagesManager.reset()
+    this.resizeManager.reset()
+    this.locationManager.reset()
   }
 }

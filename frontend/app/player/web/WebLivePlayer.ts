@@ -81,6 +81,10 @@ export default class WebLivePlayer extends WebPlayer {
     return result;
   }
 
+  changeTab = (tab: string) => {
+    this.messageManager.changeTab(tab, true)
+  }
+
   jumpToLive = () => {
     this.wpState.update({
       live: true,

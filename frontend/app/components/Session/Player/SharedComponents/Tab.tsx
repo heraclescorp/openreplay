@@ -6,10 +6,9 @@ interface Props {
   tab: string;
   currentTab: string;
   changeTab?: (tab: string) => void;
-  isLive?: boolean;
 }
 
-function Tab({ i, tab, currentTab, changeTab, isLive }: Props) {
+function Tab({ i, tab, currentTab, changeTab }: Props) {
   return (
     <div
       key={tab}
@@ -17,7 +16,7 @@ function Tab({ i, tab, currentTab, changeTab, isLive }: Props) {
       onClick={() => changeTab?.(tab)}
       className={cn(
         'self-end py-1 px-4 text-sm',
-        changeTab && !isLive ? 'cursor-pointer' : 'cursor-default',
+        changeTab ? 'cursor-pointer' : 'cursor-default',
         currentTab === tab
           ? 'border-gray-light border-t border-l border-r !border-b-white bg-white rounded-tl rounded-tr font-semibold'
           : 'cursor-pointer border-gray-light !border-b !border-t-transparent !border-l-transparent !border-r-transparent'

@@ -8,6 +8,11 @@ interface State {
   currentTab?: string;
 }
 
+interface PointerSample {
+  tabId?: string;
+  coords: [number, number];
+}
+
 const POINTER_MODE_MESSAGE_TYPE = 'aven:live-view-pointer-mode';
 const PLAYER_READY_MESSAGE_TYPE = 'aven:live-view-player-ready';
 const MOVE_THROTTLE_MS = 30;
@@ -15,8 +20,9 @@ const MOVE_THROTTLE_MS = 30;
 export default class LiveViewPointer {
   private mode: LiveViewPointerMode = 'off';
   private modeSyncKey: string | null = null;
+  private pointedTab: { tabId?: string; syncKey: string } | null = null;
   private lastMoveSentAt = 0;
-  private pendingMove: [number, number] | null = null;
+  private pendingMove: PointerSample | null = null;
   private pendingMoveTimeout: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -29,6 +35,7 @@ export default class LiveViewPointer {
     socket.on('connect', this.onConnect);
     socket.on('SESSION_RECONNECTED', this.onSessionReconnected);
     socket.on('disconnect', this.onDisconnect);
+    socket.on('SESSION_DISCONNECTED', this.onSessionDisconnected);
     if (socket.connected) {
       this.onConnect();
     }
@@ -53,12 +60,17 @@ export default class LiveViewPointer {
 
   private onDisconnect = () => {
     this.modeSyncKey = null;
+    this.clearPendingMove();
+  };
+
+  private onSessionDisconnected = () => {
+    this.clearPendingMove();
   };
 
   private syncModeIfPointing() {
     this.modeSyncKey = null;
     if (this.mode === 'point') {
-      this.emitMode();
+      this.pointAtCurrentTab();
     }
   }
 
@@ -68,10 +80,28 @@ export default class LiveViewPointer {
       this.screen.overlay.addEventListener('mousemove', this.onMouseMove);
       this.screen.overlay.addEventListener('click', this.onClick);
       this.screen.overlay.style.cursor = 'crosshair';
+      this.pointAtCurrentTab();
     } else {
       this.removeOverlayListeners();
+      const tabId = this.getCurrentTab();
+      this.turnOffPreviouslyPointedTab(tabId);
+      this.emitMode('off', tabId);
     }
-    this.emitMode();
+  }
+
+  private pointAtCurrentTab() {
+    const tabId = this.getCurrentTab();
+    if (this.pendingMove && this.pendingMove.tabId !== tabId) {
+      this.clearPendingMove();
+    }
+    this.turnOffPreviouslyPointedTab(tabId);
+    this.emitMode('point', tabId);
+  }
+
+  private turnOffPreviouslyPointedTab(currentTabId?: string) {
+    if (this.pointedTab && this.pointedTab.syncKey !== this.getModeSyncKey(currentTabId)) {
+      this.emitData('live_view_mode', { mode: 'off' }, this.pointedTab.tabId);
+    }
   }
 
   private removeOverlayListeners() {
@@ -89,7 +119,7 @@ export default class LiveViewPointer {
 
   private onMouseMove = (e: MouseEvent) => {
     const { x, y } = this.screen.getInternalCoordinates(e);
-    this.pendingMove = [x, y];
+    this.pendingMove = { tabId: this.getCurrentTab(), coords: [x, y] };
     const waitMs = this.lastMoveSentAt + MOVE_THROTTLE_MS - Date.now();
     if (waitMs <= 0) {
       this.flushPendingMove();
@@ -109,33 +139,38 @@ export default class LiveViewPointer {
 
   private onClick = (e: MouseEvent) => {
     const { x, y } = this.screen.getInternalCoordinates(e);
-    this.emitPointerEvent('live_view_pulse', [x, y]);
+    this.emitPointerEvent('live_view_pulse', { tabId: this.getCurrentTab(), coords: [x, y] });
   };
 
-  private emitPointerEvent(event: 'move' | 'live_view_pulse', data: [number, number]) {
-    if (!this.socket.connected) return;
-    if (this.modeSyncKey !== this.getModeSyncKey()) {
-      this.emitMode();
+  private emitPointerEvent(event: 'move' | 'live_view_pulse', sample: PointerSample) {
+    if (!this.socket.connected || sample.tabId !== this.getCurrentTab()) return;
+    if (this.modeSyncKey !== this.getModeSyncKey(sample.tabId)) {
+      this.pointAtCurrentTab();
     }
-    this.emitData(event, data);
+    this.emitData(event, sample.coords, sample.tabId);
   }
 
-  private emitMode() {
-    this.modeSyncKey = this.getModeSyncKey();
-    this.emitData('live_view_mode', { mode: this.mode });
+  private emitMode(mode: LiveViewPointerMode, tabId?: string) {
+    this.modeSyncKey = this.getModeSyncKey(tabId);
+    this.pointedTab = mode === 'point' ? { tabId, syncKey: this.modeSyncKey } : null;
+    this.emitData('live_view_mode', { mode }, tabId);
   }
 
-  private getModeSyncKey() {
-    return `${this.getAssistVersion()}:${this.store.get().currentTab}`;
+  private getCurrentTab() {
+    return this.store.get().currentTab;
   }
 
-  private emitData = (event: string, data: unknown) => {
+  private getModeSyncKey(tabId?: string) {
+    return `${this.getAssistVersion()}:${tabId}`;
+  }
+
+  private emitData(event: string, data: unknown, tabId?: string) {
     if (this.getAssistVersion() === 1) {
       this.socket.emit(event, data);
     } else {
-      this.socket.emit(event, { meta: { tabId: this.store.get().currentTab }, data });
+      this.socket.emit(event, { meta: { tabId }, data });
     }
-  };
+  }
 
   clean() {
     this.mode = 'off';
@@ -144,5 +179,6 @@ export default class LiveViewPointer {
     this.socket.off('connect', this.onConnect);
     this.socket.off('SESSION_RECONNECTED', this.onSessionReconnected);
     this.socket.off('disconnect', this.onDisconnect);
+    this.socket.off('SESSION_DISCONNECTED', this.onSessionDisconnected);
   }
 }

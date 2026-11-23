@@ -5,6 +5,7 @@ import type { Message } from '../messages';
 import MStreamReader from '../messages/MStreamReader';
 import JSONRawMessageReader from '../messages/JSONRawMessageReader'
 import ScreenRecording,  { SessionRecordingStatus } from './ScreenRecording'
+import LiveViewPointer from './LiveViewPointer'
 
 
 export {
@@ -233,6 +234,12 @@ export default class AssistManager {
         this.uiErrorHandler,
         this.getAssistVersion,
       )
+      this.liveViewPointer = new LiveViewPointer(
+        this.store,
+        socket,
+        this.screen,
+        this.getAssistVersion,
+      )
 
       document.addEventListener('visibilitychange', this.onVisChange)
     })
@@ -248,10 +255,14 @@ export default class AssistManager {
     return this.screenRecording?.stopRecording(...args)
   }
 
+  private liveViewPointer: LiveViewPointer | null = null
+
   /* ==== Cleaning ==== */
   private cleaned = false
   clean() {
     this.cleaned = true // sometimes cleaned before modules loaded
+    this.liveViewPointer?.clean()
+    this.liveViewPointer = null
     this.socket?.close()
     this.socket = null
     this.clearDisconnectTimeout()
